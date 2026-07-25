@@ -39,7 +39,7 @@ impl<T: Display> Display for Sensitive<T> {
 
 enum Message {
     ClientConnected {
-        author: Arc<TcpStream>,
+        author: Sender<Frame>,
         author_addr: SocketAddr,
     },
     ClientDisconnected {
@@ -53,7 +53,7 @@ enum Message {
 }
 
 struct Client {
-    conn: Arc<TcpStream>,
+    tx: Sender<Frame>,
     last_message: SystemTime,
     strike_count: u64,
     authenticated: bool,
@@ -74,7 +74,7 @@ impl Server {
         }
     }
 
-    fn client_connected(&mut self, author: Arc<TcpStream>, author_addr: SocketAddr) {
+    fn client_connected(&mut self, tx: Sender<Frame>, author_addr: SocketAddr) {
         let now = SystemTime::now();
 
         let banned_at_and_diff_time =
@@ -94,50 +94,41 @@ impl Server {
 
         if let Some((banned_at, diff)) = banned_at_and_diff_time {
             self.banned_clients.insert(author_addr.ip(), banned_at);
-
-            let mut author = author.as_ref();
-
             let secs = (BAN_LIMIT - diff).as_secs_f32();
             println!(
                 "INFO: Client {author_addr} tried to connect, but got banned for {secs} more seconds"
             );
 
-            let _ = encode(
-                &protocol::Frame::System {
+            let _ = tx
+                .send(Frame::System {
                     text: format!("You are banned! {secs}s left").into_bytes(),
-                },
-                &mut author,
-            )
-            .map_err(|err| {
-                eprintln!("Could not send ban message for client {author_addr}: {err}");
-            });
-
-            let _ = author.shutdown(std::net::Shutdown::Both).map_err(|err| {
-                eprintln!("Could not shutdown socket for {author_addr}: {err}");
-            });
+                })
+                .map_err(|err| {
+                    eprintln!("Could not send ban message for client {author_addr}: {err}");
+                });
         } else {
             println!("INFO: Client {author_addr} connected");
+
+            let _ = tx
+                .send(Frame::System {
+                    text: "Token: ".into(),
+                })
+                .map_err(|err| {
+                    eprintln!(
+                        "ERROR: Could not send token prompt to {}: {}",
+                        author_addr, err
+                    )
+                });
+
             self.clients.insert(
                 author_addr,
                 Client {
-                    conn: author.clone(),
+                    tx,
                     last_message: now - 2 * MESSAGE_RATE,
                     strike_count: 0,
                     authenticated: false,
                 },
             );
-            let _ = encode(
-                &Frame::System {
-                    text: "Token: ".into(),
-                },
-                &mut author.as_ref(),
-            )
-            .map_err(|err| {
-                eprintln!(
-                    "ERROR: Could not send token prompt to {}: {}",
-                    author_addr, err
-                )
-            });
         }
     }
 
@@ -315,7 +306,7 @@ fn client(stream: Arc<TcpStream>, messages: Sender<Message>) -> Result<()> {
     let author_addr = stream
         .peer_addr()
         .map_err(|err| eprintln!("Could not get peer address: {err}"))?;
-
+    // here i should spawn channels and writer thread with a stream
     messages
         .send(Message::ClientConnected {
             author: stream.clone(),
