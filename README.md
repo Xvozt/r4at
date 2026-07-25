@@ -13,7 +13,8 @@ Simple multi user chat application
 - add types (user message, server announcement) ✅
 - add something to handle this case: "if message is rate limited the client doesn't know that" ✅
 6. Rewrite transport with async (tokio?) 📌
-7. ... "no tengo ni una idea" what i will do after
+8. Create web admin dashboard with some info: users online, banned users, message count (topcoat?)
+9. ... "no tengo ni una idea" what i will do after
 
 
 ## Additional things:

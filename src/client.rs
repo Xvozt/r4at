@@ -116,11 +116,6 @@ enum Event {
     Dropped(u32),
 }
 
-enum Status {
-    Connected,
-    Disconnected,
-}
-
 enum Message {
     System(String),
     Incoming(String),
@@ -147,15 +142,12 @@ impl Message {
             Message::System(_) => Color::Yellow,
             Message::Incoming(_) => Color::White,
             Message::Error(_) => Color::LightRed,
-            Message::Sent {
-                text: _,
-                id: _,
-                dropped,
-            } => {
+            Message::Sent { dropped, .. } => {
                 if *dropped {
-                    return Color::Red;
+                    Color::Red
+                } else {
+                    Color::White
                 }
-                Color::White
             }
         }
     }
@@ -165,7 +157,6 @@ struct App {
     exit: bool,
     messages: Vec<Message>,
     user_message: String,
-    status: Status,
     stream: Option<TcpStream>,
     event_tx: mpsc::Sender<Event>,
     chat_state: ListState,
@@ -191,7 +182,6 @@ impl App {
                 Event::Dropped(id) => self.mark_dropped(id),
                 Event::Disconnect => {
                     self.stream.take();
-                    self.status = Status::Disconnected
                 }
                 Event::Terminal(_) => {}
             }
@@ -229,9 +219,9 @@ impl App {
 
         frame.render_widget(input, input_area);
 
-        let (status_text, status_color) = match self.status {
-            Status::Connected => ("CONNECTED", Color::LightGreen),
-            Status::Disconnected => ("DISCONNECTED", Color::Gray),
+        let (status_text, status_color) = match self.stream {
+            Some(_) => ("CONNECTED", Color::LightGreen),
+            None => ("DISCONNECTED", Color::Gray),
         };
         let status = Paragraph::new(status_text)
             .centered()
@@ -341,7 +331,6 @@ impl App {
         self.stream = Some(write_half);
         let event_tx = self.event_tx.clone();
         thread::spawn(move || handle_chat_events(event_tx, stream));
-        self.status = Status::Connected;
     }
 
     fn mark_dropped(&mut self, id: u32) {
@@ -375,7 +364,6 @@ fn main() -> io::Result<()> {
         exit: false,
         messages: vec![],
         user_message: "".to_string(),
-        status: Status::Disconnected,
         event_tx: tx_input.clone(),
         stream: None,
         chat_state: ListState::default(),
