@@ -39,7 +39,7 @@ impl<T: Display> Display for Sensitive<T> {
 
 enum Message {
     ClientConnected {
-        author: Arc<TcpStream>,
+        author: Sender<Frame>,
         author_addr: SocketAddr,
     },
     ClientDisconnected {
@@ -53,7 +53,7 @@ enum Message {
 }
 
 struct Client {
-    conn: Arc<TcpStream>,
+    tx: Sender<Frame>,
     last_message: SystemTime,
     strike_count: u64,
     authenticated: bool,
@@ -74,7 +74,7 @@ impl Server {
         }
     }
 
-    fn client_connected(&mut self, author: Arc<TcpStream>, author_addr: SocketAddr) {
+    fn client_connected(&mut self, tx: Sender<Frame>, author_addr: SocketAddr) {
         let now = SystemTime::now();
 
         let banned_at_and_diff_time =
@@ -94,50 +94,41 @@ impl Server {
 
         if let Some((banned_at, diff)) = banned_at_and_diff_time {
             self.banned_clients.insert(author_addr.ip(), banned_at);
-
-            let mut author = author.as_ref();
-
             let secs = (BAN_LIMIT - diff).as_secs_f32();
             println!(
                 "INFO: Client {author_addr} tried to connect, but got banned for {secs} more seconds"
             );
 
-            let _ = encode(
-                &protocol::Frame::System {
+            let _ = tx
+                .send(Frame::System {
                     text: format!("You are banned! {secs}s left").into_bytes(),
-                },
-                &mut author,
-            )
-            .map_err(|err| {
-                eprintln!("Could not send ban message for client {author_addr}: {err}");
-            });
-
-            let _ = author.shutdown(std::net::Shutdown::Both).map_err(|err| {
-                eprintln!("Could not shutdown socket for {author_addr}: {err}");
-            });
+                })
+                .map_err(|err| {
+                    eprintln!("Could not send ban message for client {author_addr}: {err}");
+                });
         } else {
             println!("INFO: Client {author_addr} connected");
+
+            let _ = tx
+                .send(Frame::System {
+                    text: "Token: ".into(),
+                })
+                .map_err(|err| {
+                    eprintln!(
+                        "ERROR: Could not send token prompt to {}: {}",
+                        author_addr, err
+                    )
+                });
+
             self.clients.insert(
                 author_addr,
                 Client {
-                    conn: author.clone(),
+                    tx,
                     last_message: now - 2 * MESSAGE_RATE,
                     strike_count: 0,
                     authenticated: false,
                 },
             );
-            let _ = encode(
-                &Frame::System {
-                    text: "Token: ".into(),
-                },
-                &mut author.as_ref(),
-            )
-            .map_err(|err| {
-                eprintln!(
-                    "ERROR: Could not send token prompt to {}: {}",
-                    author_addr, err
-                )
-            });
         }
     }
 
@@ -154,87 +145,63 @@ impl Server {
                 .duration_since(author.last_message)
                 .expect("TODO: we shouldn't crash if the clock goes backwards");
 
-            if diff >= MESSAGE_RATE {
-                if let Ok(text) = str::from_utf8(bytes) {
-                    author.last_message = now;
+            if diff >= MESSAGE_RATE
+                && let Ok(text) = str::from_utf8(bytes)
+            {
+                author.last_message = now;
 
-                    if author.authenticated {
-                        println!("Client {author_addr} sent message {bytes:?}");
-                        for (addr, client) in self.clients.iter() {
-                            if *addr != author_addr && client.authenticated {
-                                let _ = encode(
-                                    &Frame::Chat {
-                                        id: IGNORE_ID,
-                                        text: bytes.to_vec(),
-                                    },
-                                    &mut client.conn.as_ref(),
-                                );
-                            }
+                if author.authenticated {
+                    println!("Client {author_addr} sent message {bytes:?}");
+                    for (addr, client) in self.clients.iter() {
+                        if *addr != author_addr && client.authenticated {
+                            let _ = client.tx.send(Frame::Chat {
+                                id: IGNORE_ID,
+                                text: bytes.to_vec(),
+                            });
                         }
-                    } else {
-                        if text == self.token {
-                            author.authenticated = true;
-                            let _ = encode(
-                                &Frame::System {
-                                    text: "Welcome to the club, buddy! Now you can send messages."
-                                        .into(),
-                                },
-                                &mut author.conn.as_ref(),
-                            )
+                    }
+                } else {
+                    if text == self.token {
+                        author.authenticated = true;
+                        let _ = author
+                            .tx
+                            .send(Frame::System {
+                                text: "Welcome to the club, buddy! Now you can send messages."
+                                    .into(),
+                            })
                             .map_err(|err| {
                                 eprintln!(
                                     "Could not send auth succesfull prompt to {}: {}",
                                     author_addr, err
                                 )
                             });
-                        } else {
-                            println!("INFO: User {} failed authentication", author_addr);
-                            let _ = encode(
-                                &Frame::System {
-                                    text: "Invalid token!".into(),
-                                },
-                                &mut author.conn.as_ref(),
-                            )
+                    } else {
+                        println!("INFO: User {} failed authentication", author_addr);
+                        let _ = author
+                            .tx
+                            .send(Frame::System {
+                                text: "Invalid token!".into(),
+                            })
                             .map_err(|err| {
                                 eprintln!(
                                     "Could not send auth failed prompt to {}: {}",
                                     author_addr, err
                                 )
                             });
-                            let _ = author.conn.shutdown(std::net::Shutdown::Both);
-                            self.clients.remove(&author_addr);
-                        }
-                    }
-                } else {
-                    let _ = encode(&Frame::Dropped { id }, &mut author.conn.as_ref());
-                    author.strike_count += 1;
-                    if author.strike_count >= STRIKE_LIMIT {
-                        self.banned_clients.insert(author_addr.ip(), now);
-                        let secs = (BAN_LIMIT - diff).as_secs_f32();
-                        let _ = encode(
-                            &Frame::System {
-                                text: format!("You are banned! {secs}s left").into_bytes(),
-                            },
-                            &mut author.conn.as_ref(),
-                        );
-                        let _ = author.conn.shutdown(std::net::Shutdown::Both);
-                        println!("INFO: Client {author_addr} banned");
+                        self.clients.remove(&author_addr);
                     }
                 }
             } else {
-                let _ = encode(&Frame::Dropped { id }, &mut author.conn.as_ref());
+                let _ = author.tx.send(Frame::Dropped { id });
                 author.strike_count += 1;
                 if author.strike_count >= STRIKE_LIMIT {
                     self.banned_clients.insert(author_addr.ip(), now);
-                    let secs = (BAN_LIMIT - diff).as_secs_f32();
-                    let _ = encode(
-                        &Frame::System {
-                            text: format!("You are banned! {secs}s left").into_bytes(),
-                        },
-                        &mut author.conn.as_ref(),
-                    );
-                    let _ = author.conn.shutdown(std::net::Shutdown::Both);
-                    println!("INFO: Client {author_addr} disconnected");
+                    let secs = BAN_LIMIT.as_secs_f32();
+                    let _ = author.tx.send(Frame::System {
+                        text: format!("You are banned! {secs}s left").into(),
+                    });
+                    self.clients.remove(&author_addr);
+                    println!("INFO: Client {author_addr} banned");
                 }
             }
         }
@@ -311,20 +278,40 @@ fn server(messages: Receiver<Message>, token: String) -> Result<()> {
     }
 }
 
-fn client(stream: Arc<TcpStream>, messages: Sender<Message>) -> Result<()> {
-    let author_addr = stream
+fn client(reader_part: Arc<TcpStream>, messages: Sender<Message>) -> Result<()> {
+    let author_addr = reader_part
         .peer_addr()
         .map_err(|err| eprintln!("Could not get peer address: {err}"))?;
 
+    let mut writer_part = reader_part
+        .try_clone()
+        .map_err(|err| eprintln!("ERROR: Couldn't get stream: {err}"))?;
+
+    let (tx, rx): (Sender<Frame>, Receiver<Frame>) = channel();
+
+    thread::spawn(move || {
+        loop {
+            match rx.recv() {
+                Ok(frame) => {
+                    let _ = encode(&frame, &mut writer_part);
+                }
+                Err(_) => {
+                    let _ = writer_part.shutdown(std::net::Shutdown::Both);
+                    return;
+                }
+            }
+        }
+    });
+
     messages
         .send(Message::ClientConnected {
-            author: stream.clone(),
+            author: tx,
             author_addr,
         })
         .map_err(|err| eprintln!("ERROR: Could not send message to the server thread: {err}"))?;
 
     loop {
-        let decoded_stream = decode(&mut stream.as_ref());
+        let decoded_stream = decode(&mut reader_part.as_ref());
         match decoded_stream {
             Ok(frame) => match frame {
                 protocol::Frame::Chat { id, text } => {
