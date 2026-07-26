@@ -195,7 +195,7 @@ impl Server {
                     author.strike_count += 1;
                     if author.strike_count >= STRIKE_LIMIT {
                         self.banned_clients.insert(author_addr.ip(), now);
-                        let secs = (BAN_LIMIT - diff).as_secs_f32();
+                        let secs = BAN_LIMIT.as_secs_f32();
                         let _ = author.tx.send(Frame::System {
                             text: format!("You are banned! {secs}s left").into(),
                         });
@@ -208,7 +208,7 @@ impl Server {
                 author.strike_count += 1;
                 if author.strike_count >= STRIKE_LIMIT {
                     self.banned_clients.insert(author_addr.ip(), now);
-                    let secs = (BAN_LIMIT - diff).as_secs_f32();
+                    let secs = BAN_LIMIT.as_secs_f32();
                     let _ = author.tx.send(Frame::System {
                         text: format!("You are banned! {secs}s left").into(),
                     });
