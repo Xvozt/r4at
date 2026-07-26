@@ -145,62 +145,50 @@ impl Server {
                 .duration_since(author.last_message)
                 .expect("TODO: we shouldn't crash if the clock goes backwards");
 
-            if diff >= MESSAGE_RATE {
-                if let Ok(text) = str::from_utf8(bytes) {
-                    author.last_message = now;
+            if diff >= MESSAGE_RATE
+                && let Ok(text) = str::from_utf8(bytes)
+            {
+                author.last_message = now;
 
-                    if author.authenticated {
-                        println!("Client {author_addr} sent message {bytes:?}");
-                        for (addr, client) in self.clients.iter() {
-                            if *addr != author_addr && client.authenticated {
-                                let _ = client.tx.send(Frame::Chat {
-                                    id: IGNORE_ID,
-                                    text: bytes.to_vec(),
-                                });
-                            }
-                        }
-                    } else {
-                        if text == self.token {
-                            author.authenticated = true;
-                            let _ = author
-                                .tx
-                                .send(Frame::System {
-                                    text: "Welcome to the club, buddy! Now you can send messages."
-                                        .into(),
-                                })
-                                .map_err(|err| {
-                                    eprintln!(
-                                        "Could not send auth succesfull prompt to {}: {}",
-                                        author_addr, err
-                                    )
-                                });
-                        } else {
-                            println!("INFO: User {} failed authentication", author_addr);
-                            let _ = author
-                                .tx
-                                .send(Frame::System {
-                                    text: "Invalid token!".into(),
-                                })
-                                .map_err(|err| {
-                                    eprintln!(
-                                        "Could not send auth failed prompt to {}: {}",
-                                        author_addr, err
-                                    )
-                                });
-                            self.clients.remove(&author_addr);
+                if author.authenticated {
+                    println!("Client {author_addr} sent message {bytes:?}");
+                    for (addr, client) in self.clients.iter() {
+                        if *addr != author_addr && client.authenticated {
+                            let _ = client.tx.send(Frame::Chat {
+                                id: IGNORE_ID,
+                                text: bytes.to_vec(),
+                            });
                         }
                     }
                 } else {
-                    let _ = author.tx.send(Frame::Dropped { id });
-                    author.strike_count += 1;
-                    if author.strike_count >= STRIKE_LIMIT {
-                        self.banned_clients.insert(author_addr.ip(), now);
-                        let secs = BAN_LIMIT.as_secs_f32();
-                        let _ = author.tx.send(Frame::System {
-                            text: format!("You are banned! {secs}s left").into(),
-                        });
+                    if text == self.token {
+                        author.authenticated = true;
+                        let _ = author
+                            .tx
+                            .send(Frame::System {
+                                text: "Welcome to the club, buddy! Now you can send messages."
+                                    .into(),
+                            })
+                            .map_err(|err| {
+                                eprintln!(
+                                    "Could not send auth succesfull prompt to {}: {}",
+                                    author_addr, err
+                                )
+                            });
+                    } else {
+                        println!("INFO: User {} failed authentication", author_addr);
+                        let _ = author
+                            .tx
+                            .send(Frame::System {
+                                text: "Invalid token!".into(),
+                            })
+                            .map_err(|err| {
+                                eprintln!(
+                                    "Could not send auth failed prompt to {}: {}",
+                                    author_addr, err
+                                )
+                            });
                         self.clients.remove(&author_addr);
-                        println!("INFO: Client {author_addr} banned");
                     }
                 }
             } else {
