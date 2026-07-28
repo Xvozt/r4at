@@ -985,7 +985,6 @@ dependencies = [
  "ratatui",
  "thiserror 2.0.18",
  "tokio",
- "tokio-macros",
 ]
 
 [[package]]
