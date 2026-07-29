@@ -1,5 +1,7 @@
 use std::time::{Duration, Instant};
 
+use tokio::select;
+
 #[tokio::main]
 async fn main() {
     let now = Instant::now();
@@ -32,6 +34,40 @@ async fn main() {
         "Spent with independent tasks: {} secs\n",
         spent_using_spawn.as_secs()
     );
+
+    let first = do_job(7, 500);
+    let second = do_job(8, 1000);
+
+    let now = Instant::now();
+    tokio::select! {
+        _ = first => {
+            println!("first in select won!");
+        },
+        _ = second => {
+            println!("second in select won! But it cannot happen");
+        }
+    }
+    let spent = now.elapsed();
+    println!("Spent for the whole select: {}\n", spent.as_secs());
+
+    let mut first_interval = tokio::time::interval(Duration::from_millis(300));
+    let mut second_interval = tokio::time::interval(Duration::from_millis(500));
+    let mut counter = 0;
+    loop {
+        select! {
+            _ = first_interval.tick() => {
+                println!("First interval tick");
+                counter += 1;
+            },
+            _ = second_interval.tick() => {
+                println!("Second interval tick");
+                counter += 1;
+            }
+        }
+        if counter > 10 {
+            break;
+        };
+    }
 }
 
 async fn do_job(id: u32, ms: u64) {
