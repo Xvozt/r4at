@@ -1,4 +1,7 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use tokio::task;
 
@@ -15,6 +18,11 @@ async fn main() {
         vec_of_tasks.push(task);
     }
 
+    let counter_for_async = counter.clone();
+    let last_task = task::spawn(raise_count_async(counter_for_async, 500));
+
+    vec_of_tasks.push(last_task);
+
     for t in vec_of_tasks {
         t.await.unwrap();
     }
@@ -29,4 +37,13 @@ fn raise_count(counter: Arc<Mutex<u32>>) {
         let mut number = counter.lock().unwrap();
         *number += 1;
     }
+}
+
+async fn raise_count_async(mutex: Arc<Mutex<u32>>, hold_time: u64) {
+    {
+        let mut guard = mutex.lock().unwrap();
+        *guard += 1;
+    }
+    tokio::time::sleep(Duration::from_millis(hold_time)).await;
+    // *guard += 1; need to drop before await
 }
