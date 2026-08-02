@@ -1,5 +1,6 @@
 use std::io::{self, Read, Write};
 use thiserror::Error;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 #[derive(Debug, PartialEq)]
 pub enum Frame {
@@ -37,33 +38,49 @@ pub fn encode(frame: &Frame, stream: &mut impl Write) -> Result<(), ProtocolErro
     Ok(())
 }
 
+pub async fn encode_async<T>(frame: &Frame, stream: &mut T) -> Result<(), ProtocolError>
+where
+    T: AsyncWrite + Unpin,
+{
+    let bytes = frame_to_bytes(frame)?;
+    stream.write_all(&bytes).await?;
+    Ok(())
+}
+
 pub fn decode(stream: &mut impl Read) -> Result<Frame, ProtocolError> {
     let mut header_buf = [0u8; 3];
 
-    match stream.read_exact(&mut header_buf) {
-        Ok(_) => {}
-        Err(e) => {
-            if e.kind() == io::ErrorKind::UnexpectedEof {
-                return Err(ProtocolError::Disconnect);
-            }
-            return Err(ProtocolError::IO(e));
-        }
-    };
+    stream.read_exact(&mut header_buf).map_err(read_err)?;
 
     let frame_type = FrameType::try_from(header_buf[0])?;
     let len = u16::from_be_bytes(header_buf[1..].try_into().unwrap());
 
     let mut payload = vec![0u8; len as usize];
 
-    match stream.read_exact(&mut payload) {
-        Ok(_) => post_read_parse(frame_type, payload),
-        Err(e) => {
-            if e.kind() == io::ErrorKind::UnexpectedEof {
-                return Err(ProtocolError::Disconnect);
-            }
-            Err(ProtocolError::IO(e))
-        }
+    stream.read_exact(&mut payload).map_err(read_err)?;
+    post_read_parse(frame_type, payload)
+}
+
+pub async fn decode_async<T>(stream: &mut T) -> Result<Frame, ProtocolError>
+where
+    T: AsyncRead + Unpin,
+{
+    let mut header_buf = [0u8; HEADER_SIZE_IN_BYTES];
+    stream.read_exact(&mut header_buf).await.map_err(read_err)?;
+
+    let frame_type = FrameType::try_from(header_buf[0])?;
+    let len = u16::from_be_bytes([header_buf[1], header_buf[2]]);
+    let mut payload = vec![0u8; len as usize];
+
+    stream.read_exact(&mut payload).await.map_err(read_err)?;
+    post_read_parse(frame_type, payload)
+}
+
+fn read_err(e: io::Error) -> ProtocolError {
+    if e.kind() == io::ErrorKind::UnexpectedEof {
+        return ProtocolError::Disconnect;
     }
+    ProtocolError::IO(e)
 }
 
 fn extract_id(payload: &[u8]) -> Result<u32, ProtocolError> {
