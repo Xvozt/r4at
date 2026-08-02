@@ -12,7 +12,7 @@ Simple multi user chat application
 - introduce framing: add header to read exact size of payload instead of constant number of bytes ✅
 - add types (user message, server announcement) ✅
 - add something to handle this case: "if message is rate limited the client doesn't know that" ✅
-6. Rewrite transport with async (tokio?) 📌
+6. Rewrite transport with async (tokio?) ⏳
 8. Create web admin dashboard with some info: users online, banned users, message count (topcoat?)
 9. ... "no tengo ni una idea" what i will do after
 
