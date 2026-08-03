@@ -1,3 +1,4 @@
+use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::fmt::Write as FmtWrite;
@@ -12,7 +13,6 @@ use std::time::{Duration, SystemTime};
 use protocol::Frame;
 use protocol::decode;
 use protocol::encode;
-type Result<T> = std::result::Result<T, ()>;
 
 static SENSITIVE_MODE: AtomicBool = AtomicBool::new(false);
 const BAN_LIMIT: Duration = Duration::from_secs(10 * 60);
@@ -210,8 +210,8 @@ impl Server {
 
 fn generate_token() -> Result<String> {
     let mut token_raw = [0; 16];
-    let _ = getrandom::fill(&mut token_raw)
-        .map_err(|err| eprintln!("ERROR: Couldn't generate raw token: {err}"));
+
+    getrandom::fill(&mut token_raw).context("Failed to generate random symbols for token")?;
 
     let mut token = String::new();
 
@@ -222,14 +222,13 @@ fn generate_token() -> Result<String> {
     Ok(token)
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let token = generate_token()?;
     println!("INFO: Auth token is: {token}");
 
     let addr = "0.0.0.0:6969";
-    let listener = TcpListener::bind(addr)
-        .map_err(|err| eprintln!("ERROR: cound not bind {addr}: {}", Sensitive(err)))?;
-
+    let listener = TcpListener::bind(addr)?;
     println!("Listening to {}", Sensitive(addr));
 
     let (message_sender, message_recevier): (Sender<Message>, Receiver<Message>) = channel();
@@ -279,13 +278,9 @@ fn server(messages: Receiver<Message>, token: String) -> Result<()> {
 }
 
 fn client(reader_part: Arc<TcpStream>, messages: Sender<Message>) -> Result<()> {
-    let author_addr = reader_part
-        .peer_addr()
-        .map_err(|err| eprintln!("Could not get peer address: {err}"))?;
+    let author_addr = reader_part.peer_addr()?;
 
-    let mut writer_part = reader_part
-        .try_clone()
-        .map_err(|err| eprintln!("ERROR: Couldn't get stream: {err}"))?;
+    let mut writer_part = reader_part.try_clone()?;
 
     let (tx, rx): (Sender<Frame>, Receiver<Frame>) = channel();
 
@@ -303,30 +298,20 @@ fn client(reader_part: Arc<TcpStream>, messages: Sender<Message>) -> Result<()> 
         }
     });
 
-    messages
-        .send(Message::ClientConnected {
-            author: tx,
-            author_addr,
-        })
-        .map_err(|err| eprintln!("ERROR: Could not send message to the server thread: {err}"))?;
+    messages.send(Message::ClientConnected {
+        author: tx,
+        author_addr,
+    })?;
 
     loop {
         let decoded_stream = decode(&mut reader_part.as_ref());
         match decoded_stream {
             Ok(frame) => match frame {
-                protocol::Frame::Chat { id, text } => {
-                    messages
-                        .send(Message::Received {
-                            author_addr,
-                            bytes: text,
-                            id,
-                        })
-                        .map_err(|err| {
-                            eprintln!(
-                                "ERROR: Failed to send a message to the server thread: {err}"
-                            );
-                        })?;
-                }
+                protocol::Frame::Chat { id, text } => messages.send(Message::Received {
+                    author_addr,
+                    bytes: text,
+                    id,
+                })?,
                 _ => {
                     eprintln!("Client Cannot send Frame except Chat frame");
                     let _ = messages.send(Message::ClientDisconnected { author_addr });
