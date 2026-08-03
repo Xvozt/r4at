@@ -1,12 +1,13 @@
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
-use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::str;
 use std::sync::Arc;
-use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 use std::time::{Duration, SystemTime};
+use tokio::net::TcpListener;
+use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedReceiver, UnboundedSender};
 
 use protocol::Frame;
 use protocol::decode;
@@ -208,26 +209,18 @@ async fn main() -> Result<()> {
     println!("INFO: Auth token is: {token}");
 
     let addr = "0.0.0.0:6969";
-    let listener = TcpListener::bind(addr)?;
+    let listener = TcpListener::bind(addr).await?;
     println!("Listening to {}", addr);
 
-    let (message_sender, message_recevier): (Sender<Message>, Receiver<Message>) = channel();
-    thread::spawn(|| server(message_recevier, token));
+    let (message_sender, message_recevier): (UnboundedSender<Message>, UnboundedReceiver<Message>) =
+        mpsc::unbounded_channel();
 
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
-                let message_sender = message_sender.clone();
+    tokio::spawn(server(message_recevier, token));
 
-                thread::spawn(move || client(Arc::new(stream), message_sender));
-            }
-            Err(e) => {
-                eprintln!("ERROR: could not accept connection: {e}")
-            }
-        }
+    loop {
+        let (stream, addr) = listener.accept().await?;
+        tokio::spawn(client(stream, message_sender.clone()));
     }
-
-    Ok(())
 }
 
 fn server(messages: Receiver<Message>, token: String) -> Result<()> {
