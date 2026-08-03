@@ -1,11 +1,9 @@
 use anyhow::{Context, Result};
 use std::collections::HashMap;
-use std::fmt::Display;
 use std::fmt::Write as FmtWrite;
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::str;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 use std::time::{Duration, SystemTime};
@@ -14,28 +12,10 @@ use protocol::Frame;
 use protocol::decode;
 use protocol::encode;
 
-static SENSITIVE_MODE: AtomicBool = AtomicBool::new(false);
 const BAN_LIMIT: Duration = Duration::from_secs(10 * 60);
 const MESSAGE_RATE: Duration = Duration::from_secs(1);
 const STRIKE_LIMIT: u64 = 10;
 const IGNORE_ID: u32 = 0;
-
-#[allow(dead_code)]
-fn set_sensitive_mode(enabled: bool) {
-    SENSITIVE_MODE.store(enabled, Ordering::Relaxed);
-}
-
-struct Sensitive<T>(T);
-
-impl<T: Display> Display for Sensitive<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if SENSITIVE_MODE.load(Ordering::Relaxed) {
-            write!(f, "[REDACTED]")
-        } else {
-            self.0.fmt(f)
-        }
-    }
-}
 
 enum Message {
     ClientConnected {
@@ -229,7 +209,7 @@ async fn main() -> Result<()> {
 
     let addr = "0.0.0.0:6969";
     let listener = TcpListener::bind(addr)?;
-    println!("Listening to {}", Sensitive(addr));
+    println!("Listening to {}", addr);
 
     let (message_sender, message_recevier): (Sender<Message>, Receiver<Message>) = channel();
     thread::spawn(|| server(message_recevier, token));
