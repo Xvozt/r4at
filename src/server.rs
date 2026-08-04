@@ -1,17 +1,16 @@
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
-use std::net::{IpAddr, SocketAddr, TcpStream};
+use std::net::{IpAddr, SocketAddr};
 use std::str;
-use std::sync::Arc;
-use std::thread;
 use std::time::{Duration, SystemTime};
-use tokio::net::TcpListener;
-use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedReceiver, UnboundedSender};
+use tokio::io::AsyncWriteExt;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::task;
 
-use protocol::Frame;
-use protocol::decode;
-use protocol::encode;
+use protocol::{Frame, encode_async};
+use protocol::{ProtocolError, decode_async};
 
 const BAN_LIMIT: Duration = Duration::from_secs(10 * 60);
 const MESSAGE_RATE: Duration = Duration::from_secs(1);
@@ -20,7 +19,7 @@ const IGNORE_ID: u32 = 0;
 
 enum Message {
     ClientConnected {
-        author: Sender<Frame>,
+        author: UnboundedSender<Frame>,
         author_addr: SocketAddr,
     },
     ClientDisconnected {
@@ -34,7 +33,7 @@ enum Message {
 }
 
 struct Client {
-    tx: Sender<Frame>,
+    tx: UnboundedSender<Frame>,
     last_message: SystemTime,
     strike_count: u64,
     authenticated: bool,
@@ -55,7 +54,7 @@ impl Server {
         }
     }
 
-    fn client_connected(&mut self, tx: Sender<Frame>, author_addr: SocketAddr) {
+    fn client_connected(&mut self, tx: UnboundedSender<Frame>, author_addr: SocketAddr) {
         let now = SystemTime::now();
 
         let banned_at_and_diff_time =
@@ -219,16 +218,14 @@ async fn main() -> Result<()> {
 
     loop {
         let (stream, addr) = listener.accept().await?;
-        tokio::spawn(client(stream, message_sender.clone()));
+        tokio::spawn(client(stream, addr, message_sender.clone()));
     }
 }
 
-fn server(messages: Receiver<Message>, token: String) -> Result<()> {
+async fn server(mut messages: UnboundedReceiver<Message>, token: String) -> Result<()> {
     let mut server = Server::with_token(token);
 
-    loop {
-        let msg = messages.recv().expect("The server receiver is not hung up");
-
+    while let Some(msg) = messages.recv().await {
         match msg {
             Message::ClientConnected {
                 author,
@@ -248,24 +245,35 @@ fn server(messages: Receiver<Message>, token: String) -> Result<()> {
             }
         }
     }
+    Ok(())
 }
 
-fn client(reader_part: Arc<TcpStream>, messages: Sender<Message>) -> Result<()> {
-    let author_addr = reader_part.peer_addr()?;
+async fn client(
+    stream: TcpStream,
+    author_addr: SocketAddr,
+    messages: UnboundedSender<Message>,
+) -> Result<()> {
+    let (mut reader_part, mut writer_part) = stream.into_split();
 
-    let mut writer_part = reader_part.try_clone()?;
+    let (tx, mut rx): (UnboundedSender<Frame>, UnboundedReceiver<Frame>) = unbounded_channel();
 
-    let (tx, rx): (Sender<Frame>, Receiver<Frame>) = channel();
-
-    thread::spawn(move || {
+    task::spawn(async move {
         loop {
-            match rx.recv() {
-                Ok(frame) => {
-                    let _ = encode(&frame, &mut writer_part);
-                }
-                Err(_) => {
-                    let _ = writer_part.shutdown(std::net::Shutdown::Both);
-                    return;
+            match rx.recv().await {
+                Some(frame) => match encode_async(&frame, &mut writer_part).await {
+                    Ok(_) => {}
+                    Err(ProtocolError::IO(e)) => {
+                        eprintln!("Socket is dead: {e}");
+                        break;
+                    }
+                    Err(e) => {
+                        eprintln!("Tried to send bad frame: {e}");
+                        continue;
+                    }
+                },
+                None => {
+                    let _ = writer_part.shutdown().await;
+                    break;
                 }
             }
         }
@@ -277,7 +285,7 @@ fn client(reader_part: Arc<TcpStream>, messages: Sender<Message>) -> Result<()> 
     })?;
 
     loop {
-        let decoded_stream = decode(&mut reader_part.as_ref());
+        let decoded_stream = decode_async(&mut reader_part).await;
         match decoded_stream {
             Ok(frame) => match frame {
                 protocol::Frame::Chat { id, text } => messages.send(Message::Received {
