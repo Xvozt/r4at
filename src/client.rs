@@ -7,10 +7,10 @@ use std::{
 };
 
 use crossterm::event::{
-    self,
     Event::{self as CtEvent},
-    KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+    EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
 };
+use futures::StreamExt;
 use protocol::{decode, encode};
 use ratatui::{
     layout::{Constraint, Layout},
@@ -18,6 +18,10 @@ use ratatui::{
     symbols::border,
     text::{Line, Span, Text},
     widgets::{Block, List, ListState, Paragraph},
+};
+use tokio::{
+    sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
+    task,
 };
 
 macro_rules! chat_info {
@@ -114,6 +118,7 @@ enum Event {
     System(String),
     Disconnect,
     Dropped(u32),
+    Error(String),
 }
 
 enum Message {
@@ -158,32 +163,38 @@ struct App {
     messages: Vec<Message>,
     user_message: String,
     stream: Option<TcpStream>,
-    event_tx: mpsc::Sender<Event>,
+    event_tx: UnboundedSender<Event>,
     chat_state: ListState,
     next_message_id: u32,
 }
 impl App {
-    fn run(
+    async fn run(
         &mut self,
         terminal: &mut ratatui::DefaultTerminal,
-        rx: mpsc::Receiver<Event>,
+        mut rx: UnboundedReceiver<Event>,
     ) -> io::Result<()> {
         while !self.exit {
             terminal.draw(|frame| self.draw(frame))?;
 
-            match rx.recv().unwrap() {
-                Event::Terminal(CtEvent::Key(k)) => self.handle_key_events(k)?,
-                Event::Chat(message) => {
-                    chat_msg!(self, "{message}");
+            match rx.recv().await {
+                Some(ev) => match ev {
+                    Event::Terminal(CtEvent::Key(k)) => self.handle_key_events(k)?,
+                    Event::Chat(message) => {
+                        chat_msg!(self, "{message}");
+                    }
+                    Event::System(message) => {
+                        chat_info!(self, "{message}")
+                    }
+                    Event::Error(message) => chat_err!(self, "{message}"),
+                    Event::Dropped(id) => self.mark_dropped(id),
+                    Event::Disconnect => {
+                        self.stream.take();
+                    }
+                    Event::Terminal(_) => {}
+                },
+                None => {
+                    break;
                 }
-                Event::System(message) => {
-                    chat_info!(self, "{message}")
-                }
-                Event::Dropped(id) => self.mark_dropped(id),
-                Event::Disconnect => {
-                    self.stream.take();
-                }
-                Event::Terminal(_) => {}
             }
         }
         Ok(())
@@ -356,9 +367,10 @@ fn wrap_text(message: &str, width: usize) -> Vec<Line<'static>> {
         .collect()
 }
 
-fn main() -> io::Result<()> {
+#[tokio::main]
+async fn main() -> io::Result<()> {
     let mut terminal = ratatui::init();
-    let (tx_input, event_rx) = mpsc::channel::<Event>();
+    let (tx_input, event_rx) = unbounded_channel::<Event>();
 
     let mut app = App {
         exit: false,
@@ -375,9 +387,9 @@ fn main() -> io::Result<()> {
         app.connect(&addr);
     }
 
-    thread::spawn(move || handle_input_events(tx_input));
+    task::spawn(handle_input_events(tx_input));
 
-    app.run(&mut terminal, event_rx)
+    app.run(&mut terminal, event_rx).await
 }
 
 fn handle_chat_events(tx_reader: mpsc::Sender<Event>, mut stream: TcpStream) {
@@ -400,8 +412,28 @@ fn handle_chat_events(tx_reader: mpsc::Sender<Event>, mut stream: TcpStream) {
     }
 }
 
-fn handle_input_events(tx: mpsc::Sender<Event>) {
+async fn handle_input_events(tx: UnboundedSender<Event>) {
+    let mut reader = EventStream::new();
     loop {
-        tx.send(Event::Terminal(event::read().unwrap())).unwrap()
+        let event = reader.next().await;
+
+        match event {
+            Some(Ok(e)) => {
+                if tx.send(Event::Terminal(e)).is_err() {
+                    break;
+                }
+            }
+            Some(Err(e)) => {
+                if tx
+                    .send(Event::Error(format!("Problem with input occurred: {e}")))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            None => {
+                break;
+            }
+        }
     }
 }
