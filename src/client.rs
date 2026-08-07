@@ -1,9 +1,6 @@
 use std::{
     env,
     io::{self},
-    net::{Shutdown, TcpStream},
-    sync::mpsc,
-    thread,
 };
 
 use crossterm::event::{
@@ -11,7 +8,7 @@ use crossterm::event::{
     EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
 };
 use futures::StreamExt;
-use protocol::{decode, encode};
+use protocol::{Frame, ProtocolError, decode_async, encode_async};
 use ratatui::{
     layout::{Constraint, Layout},
     style::{Color, Style},
@@ -20,6 +17,8 @@ use ratatui::{
     widgets::{Block, List, ListState, Paragraph},
 };
 use tokio::{
+    io::{AsyncRead, AsyncWriteExt},
+    net::TcpStream,
     sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
     task,
 };
@@ -77,8 +76,8 @@ const COMMANDS: &[Command] = &[
 fn disconnect_command(app: &mut App, _arg: &str) {
     let stream = app.stream.take();
     match stream {
-        Some(s) => {
-            let _ = s.shutdown(Shutdown::Both);
+        Some(_) => {
+            let _ = app.event_tx.send(Event::Disconnect);
         }
         None => {
             chat_info!(app, "You are already disconnected");
@@ -117,6 +116,7 @@ enum Event {
     Chat(String),
     System(String),
     Disconnect,
+    Connect(UnboundedSender<Frame>),
     Dropped(u32),
     Error(String),
 }
@@ -162,7 +162,7 @@ struct App {
     exit: bool,
     messages: Vec<Message>,
     user_message: String,
-    stream: Option<TcpStream>,
+    stream: Option<UnboundedSender<Frame>>,
     event_tx: UnboundedSender<Event>,
     chat_state: ListState,
     next_message_id: u32,
@@ -189,6 +189,9 @@ impl App {
                     Event::Dropped(id) => self.mark_dropped(id),
                     Event::Disconnect => {
                         self.stream.take();
+                    }
+                    Event::Connect(tx) => {
+                        self.stream = Some(tx);
                     }
                     Event::Terminal(_) => {}
                 },
@@ -305,15 +308,12 @@ impl App {
                 }
             }
             None => {
-                let stream = self.stream.as_mut();
+                let stream = self.stream.as_ref();
                 if let Some(stream) = stream {
-                    let _ = encode(
-                        &protocol::Frame::Chat {
-                            id: self.next_message_id,
-                            text: message.clone().into_bytes(),
-                        },
-                        stream,
-                    );
+                    let _ = stream.send(Frame::Chat {
+                        id: self.next_message_id,
+                        text: message.clone().into_bytes(),
+                    });
                     self.push_message(Message::Sent {
                         text: message,
                         id: self.next_message_id,
@@ -331,17 +331,48 @@ impl App {
         self.user_message.clear();
     }
     fn connect(&mut self, ip: &str) {
-        let Ok(stream) = TcpStream::connect(format!("{ip}:6969")) else {
-            chat_err!(self, "Couldn't reach IP");
-            return;
-        };
-        let Ok(write_half) = stream.try_clone() else {
-            chat_err!(self, "Couldn't connect to the server");
-            return;
-        };
-        self.stream = Some(write_half);
+        let ip = ip.to_string();
         let event_tx = self.event_tx.clone();
-        thread::spawn(move || handle_chat_events(event_tx, stream));
+
+        task::spawn(async move {
+            let Ok(stream) = TcpStream::connect(format!("{ip}:6969")).await else {
+                let _ = event_tx.send(Event::Error("Couldn't reach IP".into()));
+                return;
+            };
+
+            let (reader_part, mut writer_part) = stream.into_split();
+            let (tx, mut rx): (UnboundedSender<Frame>, UnboundedReceiver<Frame>) =
+                unbounded_channel();
+
+            let writer_task_tx = event_tx.clone();
+            let reader_task_tx = event_tx.clone();
+
+            task::spawn(handle_chat_events(reader_task_tx.clone(), reader_part));
+            task::spawn(async move {
+                loop {
+                    match rx.recv().await {
+                        Some(frame) => match encode_async(&frame, &mut writer_part).await {
+                            Ok(_) => {}
+                            Err(ProtocolError::IO(e)) => {
+                                let _ = writer_task_tx
+                                    .send(Event::Error(format!("Socket is dead: {e}")));
+                                break;
+                            }
+                            Err(e) => {
+                                let _ = writer_task_tx
+                                    .send(Event::Error(format!("Tried to send bad frame: {e}")));
+                                continue;
+                            }
+                        },
+                        None => {
+                            let _ = writer_part.shutdown().await;
+                            break;
+                        }
+                    }
+                }
+            });
+            let _ = event_tx.send(Event::Connect(tx));
+        });
     }
 
     fn mark_dropped(&mut self, id: u32) {
@@ -392,9 +423,12 @@ async fn main() -> io::Result<()> {
     app.run(&mut terminal, event_rx).await
 }
 
-fn handle_chat_events(tx_reader: mpsc::Sender<Event>, mut stream: TcpStream) {
+async fn handle_chat_events<T>(tx_reader: UnboundedSender<Event>, mut stream: T)
+where
+    T: AsyncRead + Unpin,
+{
     loop {
-        match decode(&mut stream) {
+        match decode_async(&mut stream).await {
             Ok(f) => match f {
                 protocol::Frame::Chat { text, .. } => tx_reader
                     .send(Event::Chat(String::from_utf8_lossy(&text).into_owned()))
