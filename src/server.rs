@@ -3,11 +3,15 @@ use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
 use std::net::{IpAddr, SocketAddr};
 use std::str;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
-use tokio::io::AsyncWriteExt;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, split};
+use tokio::net::TcpListener;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task;
+use tokio_rustls::TlsAcceptor;
+use tokio_rustls::rustls::ServerConfig;
+use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 use protocol::{Frame, encode_async};
 use protocol::{ProtocolError, decode_async};
@@ -207,6 +211,19 @@ async fn main() -> Result<()> {
     let token = generate_token()?;
     println!("INFO: Auth token is: {token}");
 
+    let cert_file = std::fs::read("certs/server_cert.der")?;
+    let chain = vec![CertificateDer::from(cert_file)];
+
+    let key_file = std::fs::read("certs/server_key.der")?;
+    let key = PrivateKeyDer::try_from(key_file)
+        .map_err(|e| anyhow::anyhow!("failed to parse private key: {e}"))?;
+
+    let config = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(chain, key)?;
+
+    let acceptor = TlsAcceptor::from(Arc::new(config));
+
     let addr = "0.0.0.0:6969";
     let listener = TcpListener::bind(addr).await?;
     println!("Listening to {}", addr);
@@ -218,7 +235,14 @@ async fn main() -> Result<()> {
 
     loop {
         let (stream, addr) = listener.accept().await?;
-        tokio::spawn(client(stream, addr, message_sender.clone()));
+        let tls_stream = match acceptor.accept(stream).await {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("TLS handshake failed for {addr}: {e}");
+                continue;
+            }
+        };
+        tokio::spawn(client(tls_stream, addr, message_sender.clone()));
     }
 }
 
@@ -248,12 +272,15 @@ async fn server(mut messages: UnboundedReceiver<Message>, token: String) -> Resu
     Ok(())
 }
 
-async fn client(
-    stream: TcpStream,
+async fn client<S>(
+    stream: S,
     author_addr: SocketAddr,
     messages: UnboundedSender<Message>,
-) -> Result<()> {
-    let (mut reader_part, mut writer_part) = stream.into_split();
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (mut reader_part, mut writer_part) = split(stream);
 
     let (tx, mut rx): (UnboundedSender<Frame>, UnboundedReceiver<Frame>) = unbounded_channel();
 
