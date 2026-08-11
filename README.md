@@ -26,7 +26,7 @@ Simple multi user chat application
 
 ## To fix
   - unwraps in senders
-  - i have 2 fields that both mean "client connected": status and stream. I should get rid of status.
+  - i have 2 fields that both mean "client connected": status and stream. I should get rid of status. ✅
   - need to make widget for messages scrollable to show only last N messages if count is more than height of the area! ✅
 
 
