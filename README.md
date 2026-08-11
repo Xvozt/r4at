@@ -13,8 +13,13 @@ Simple multi user chat application
 - add types (user message, server announcement) ✅
 - add something to handle this case: "if message is rate limited the client doesn't know that" ✅
 6. Rewrite transport with async (tokio?) ✅
-8. Create web admin dashboard with some info: users online, banned users, message count (topcoat?) 📌
-9. ... "no tengo ni una idea" what i will do after
+
+## Roadmap (next — in order)
+
+1. **Auth experiments** 📌 — replace the current shared token (printed on the server, copy-pasted after connect) with real authentication. On the table: mutual TLS / client certificates (extends the existing rustls setup — clients authenticate themselves cryptographically), or app-level accounts (usernames + hashed passwords).
+2. **Admin web dashboard** 📌 — live server info: users online, banned users, message count. Built with [topcoat](https://github.com/tokio-rs/topcoat).
+3. **Persistence + message history** 📌 — store messages (e.g. sqlite via sqlx); reconnecting clients can see what they missed.
+4. **Rooms / channels** 📌 — route messages to rooms instead of one global relay (a good fit for tokio broadcast channels).
 
 
 ## Additional things:
@@ -32,10 +37,16 @@ Simple multi user chat application
 
 ## Start instructions (locally)
 
+### First-time setup (TLS certs)
+The server talks TLS, so it needs a cert + key. Generate them once — writes to `certs/` (the key is gitignored, the cert is committed and pinned into the client):
+```console
+$ cargo run --example gen_cert
+```
+
 ### Server
 ```console
 $ cargo run --bin server
-Token: <generated token>
+INFO: Auth token is: <generated token>
 <logs>
 ```
 ### Client
