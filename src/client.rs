@@ -1,8 +1,6 @@
-use std::{
-    env,
-    io::{self},
-};
+use std::{env, sync::Arc};
 
+use anyhow::Result;
 use crossterm::event::{
     Event::{self as CtEvent},
     EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
@@ -17,10 +15,17 @@ use ratatui::{
     widgets::{Block, List, ListState, Paragraph},
 };
 use tokio::{
-    io::{AsyncRead, AsyncWriteExt},
+    io::{AsyncRead, AsyncWriteExt, split},
     net::TcpStream,
     sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
     task,
+};
+use tokio_rustls::{
+    TlsConnector,
+    rustls::{
+        ClientConfig, RootCertStore,
+        pki_types::{CertificateDer, ServerName},
+    },
 };
 
 macro_rules! chat_info {
@@ -163,6 +168,7 @@ struct App {
     messages: Vec<Message>,
     user_message: String,
     stream: Option<UnboundedSender<Frame>>,
+    connector: TlsConnector,
     event_tx: UnboundedSender<Event>,
     chat_state: ListState,
     next_message_id: u32,
@@ -172,7 +178,7 @@ impl App {
         &mut self,
         terminal: &mut ratatui::DefaultTerminal,
         mut rx: UnboundedReceiver<Event>,
-    ) -> io::Result<()> {
+    ) -> Result<()> {
         while !self.exit {
             terminal.draw(|frame| self.draw(frame))?;
 
@@ -333,14 +339,26 @@ impl App {
     fn connect(&mut self, ip: &str) {
         let ip = ip.to_string();
         let event_tx = self.event_tx.clone();
-
+        let connector = self.connector.clone();
         task::spawn(async move {
+            let server_name =
+                ServerName::try_from("rchat.server").expect("rchat.server is a valid DNS name");
+
             let Ok(stream) = TcpStream::connect(format!("{ip}:6969")).await else {
                 let _ = event_tx.send(Event::Error("Couldn't reach IP".into()));
                 return;
             };
 
-            let (reader_part, mut writer_part) = stream.into_split();
+            let tls_stream = match connector.connect(server_name, stream).await {
+                Ok(s) => s,
+                Err(_) => {
+                    let _ =
+                        event_tx.send(Event::Error("Couldnt establish secure connection".into()));
+                    return;
+                }
+            };
+
+            let (reader_part, mut writer_part) = split(tls_stream);
             let (tx, mut rx): (UnboundedSender<Frame>, UnboundedReceiver<Frame>) =
                 unbounded_channel();
 
@@ -399,7 +417,17 @@ fn wrap_text(message: &str, width: usize) -> Vec<Line<'static>> {
 }
 
 #[tokio::main]
-async fn main() -> io::Result<()> {
+async fn main() -> Result<()> {
+    let cert_bytes = include_bytes!("../certs/server_cert.der");
+    let cert = CertificateDer::from(&cert_bytes[..]);
+    let mut store = RootCertStore::empty();
+    store.add(cert)?;
+
+    let config = ClientConfig::builder()
+        .with_root_certificates(store)
+        .with_no_client_auth();
+    let connector = TlsConnector::from(Arc::new(config));
+
     let mut terminal = ratatui::init();
     let (tx_input, event_rx) = unbounded_channel::<Event>();
 
@@ -408,6 +436,7 @@ async fn main() -> io::Result<()> {
         messages: vec![],
         user_message: "".to_string(),
         event_tx: tx_input.clone(),
+        connector,
         stream: None,
         chat_state: ListState::default(),
         next_message_id: 0,
